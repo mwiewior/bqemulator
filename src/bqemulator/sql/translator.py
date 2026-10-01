@@ -77,6 +77,51 @@ _UNSUPPORTED_KEYWORDS: frozenset[str] = frozenset(
 )
 
 
+#: BigQuery's ``NUMERIC`` - a fixed ``DECIMAL(38, 9)``.
+_NUMERIC_PRECISION = 38
+_NUMERIC_SCALE = 9
+
+
+def _pin_numeric_precision(tree: exp.Expression) -> None:
+    """Give every unparameterised ``NUMERIC`` / ``DECIMAL`` type BigQuery's ``(38, 9)``, in place.
+
+    SQLGlot's DuckDB generator emits a BigQuery ``NUMERIC`` *type* (a DDL column, ``CAST(x AS
+    NUMERIC)``, a ``STRUCT`` field) as a bare ``DECIMAL``, which DuckDB reads as ``DECIMAL(18,
+    3)``: a fourth decimal is silently rounded away (``1234.5678`` → ``1234.568``) and anything
+    past 15 integer digits fails to cast. Done on the BigQuery AST, before generation, because
+    a re-parsed bare DuckDB ``DECIMAL`` already carries DuckDB's ``(18, 3)`` default and can no
+    longer be told apart from an explicit ``NUMERIC(18, 3)``; an identifier is never a
+    ``DataType`` node, so a column named ``numeric`` is untouched. ``BIGNUMERIC`` parses as
+    ``BIGDECIMAL`` and keeps its own handling.
+    """
+    for node in tree.find_all(exp.DataType):
+        if node.is_type(exp.DataType.Type.DECIMAL) and not node.expressions:
+            node.set(
+                "expressions",
+                [
+                    exp.DataTypeParam(this=exp.Literal.number(_NUMERIC_PRECISION)),
+                    exp.DataTypeParam(this=exp.Literal.number(_NUMERIC_SCALE)),
+                ],
+            )
+
+
+def _transpile_to_duckdb(bq_sql: str) -> list[str]:
+    """Transpile BigQuery SQL to DuckDB, pinning NUMERIC precision on the way.
+
+    The same parse-then-generate ``sqlglot.transpile(bq_sql, read="bigquery",
+    write="duckdb")`` does, with :func:`_pin_numeric_precision` applied in between.
+    """
+    duckdb_dialect = sqlglot.Dialect.get_or_raise("duckdb")
+    out: list[str] = []
+    for tree in sqlglot.parse(bq_sql, read="bigquery"):
+        if not isinstance(tree, exp.Expression):  # ``parse`` is typed ``Expr | None``
+            out.append("")
+            continue
+        _pin_numeric_precision(tree)
+        out.append(duckdb_dialect.generate(tree, copy=False, pretty=False))
+    return out
+
+
 def _resolve_caller(caller: CallerIdentity | None) -> CallerIdentity:
     """Return ``caller`` if supplied, else the unauthenticated fallback.
 
@@ -324,12 +369,7 @@ class SQLTranslator:
 
         # 3. SQLGlot transpile.
         try:
-            transpiled_list = sqlglot.transpile(
-                bq_sql_for_transpile,
-                read="bigquery",
-                write="duckdb",
-                pretty=False,
-            )
+            transpiled_list = _transpile_to_duckdb(bq_sql_for_transpile)
         except sqlglot.errors.ParseError as exc:
             return Err(sql_parse_error(str(exc)))
         except sqlglot.errors.OptimizeError as exc:

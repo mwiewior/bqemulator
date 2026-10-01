@@ -536,6 +536,69 @@ def _split_format_on_year(fmt: str) -> list[str]:
 _MIN_YEAR_SPLIT_PARTS = 2
 
 
+def _e4y_to_strftime(fmt: str) -> str | None:
+    """Return ``fmt`` with every real ``%E4Y`` turned into DuckDB's ``%Y``.
+
+    ``None`` when it holds none, or also holds a plain ``%Y`` (left to
+    :class:`FormatDateYearPadRule`). ``%%`` stays a literal percent, so ``%%E4Y`` is literal
+    text, never a directive.
+    """
+    out: list[str] = []
+    found = False
+    i, n = 0, len(fmt)
+    while i < n:
+        if fmt.startswith("%E4Y", i):
+            out.append("%Y")
+            found = True
+            i += 4
+            continue
+        if fmt[i] == "%" and i + 1 < n:
+            if fmt[i + 1] == "Y":
+                return None
+            out.append(fmt[i : i + 2])
+            i += 2
+            continue
+        out.append(fmt[i])
+        i += 1
+    return "".join(out) if found else None
+
+
+@register
+class FormatYearE4YRule(TranslationRule):
+    """``FORMAT_DATE`` / ``FORMAT_DATETIME`` with ``%E4Y`` → DuckDB ``STRFTIME`` with ``%Y``.
+
+    BigQuery's ``%E4Y`` is a four-digit, zero-padded year; DuckDB's ``STRFTIME`` rejects the
+    specifier outright (``Unrecognized format for strftime/strptime: %E``) but its own ``%Y``
+    already zero-pads to four digits, which is exactly ``%E4Y``. Emitted as an anonymous
+    ``STRFTIME`` call so :class:`FormatDateYearPadRule` - which deliberately *un*-pads a plain
+    ``%Y`` - never sees the result.
+    """
+
+    name = "FORMAT_YEAR_E4Y"
+
+    def applies_to(self, node: exp.Expression) -> bool:
+        """Match ``STRFTIME(…, '<string literal with %E4Y>')``."""
+        if not isinstance(node, exp.TimeToStr):
+            return False
+        fmt = node.args.get("format")
+        return (
+            isinstance(fmt, exp.Literal)
+            and fmt.is_string
+            and _e4y_to_strftime(str(fmt.this)) is not None
+        )
+
+    def rewrite(self, node: exp.Expression) -> exp.Expression:
+        """Emit ``STRFTIME(value, '<format with %Y>')``."""
+        fmt = node.args.get("format")
+        value = node.this
+        rewritten = _e4y_to_strftime(str(fmt.this)) if isinstance(fmt, exp.Literal) else None
+        if value is None or rewritten is None:
+            return node
+        return exp.Anonymous(
+            this="STRFTIME", expressions=[value.copy(), exp.Literal.string(rewritten)]
+        )
+
+
 @register
 class FormatDateYearPadRule(TranslationRule):
     """``FORMAT_DATE('…%Y…', d)`` → unpadded-year rewrite (years < 1000).
@@ -910,6 +973,7 @@ __all__ = [
     "FormatDateYearPadRule",
     "FormatPrintfRule",
     "FormatTimeRule",
+    "FormatYearE4YRule",
     "JsonTypeLowerRule",
     "ParseDatetimeRule",
     "ParseTimestampUtcRule",

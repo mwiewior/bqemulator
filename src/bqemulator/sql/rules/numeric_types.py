@@ -84,4 +84,60 @@ class ParseBignumericRule(TranslationRule):
         return exp.Anonymous(this="bqemu_to_bignumeric", expressions=[arg.copy()])
 
 
-__all__ = ["ParseBignumericRule", "ParseNumericRule"]
+def _is_decimal(node: exp.Expression | None) -> bool:
+    """Return whether an expression is already known to be ``DECIMAL``.
+
+    That is a ``CAST(… AS DECIMAL)``, or any node ``annotate_types`` typed as one (a NUMERIC
+    column, arithmetic over NUMERICs).
+    """
+    if node is None:
+        return False
+    if isinstance(node, exp.Cast) and node.to is not None:
+        return node.to.is_type(exp.DataType.Type.DECIMAL)
+    node_type = node.type
+    return isinstance(node_type, exp.DataType) and node_type.is_type(exp.DataType.Type.DECIMAL)
+
+
+# BigQuery prints a NUMERIC in its shortest exact form; DuckDB pads to the column's scale
+# (``1.500``). Strip a fractional part's trailing zeros, and the point itself when nothing
+# but zeros follows it: ``1.500`` → ``1.5``, ``42.000`` → ``42``, ``100`` stays ``100``.
+_TRAILING_ZEROS = r"(\.[0-9]*[1-9])0+$|\.0+$"
+
+
+@register
+class NumericToStringRule(TranslationRule):
+    """``CAST(<NUMERIC> AS STRING)`` → BigQuery's canonical rendering, no padded scale.
+
+    Only fires for an operand known to be ``DECIMAL`` (see :func:`_is_decimal`) - a STRING
+    that merely looks numeric (``CAST('100.000' AS STRING)``) is never rewritten.
+    """
+
+    name = "NUMERIC_TO_STRING"
+
+    def applies_to(self, node: exp.Expression) -> bool:
+        """Match ``CAST``/``TRY_CAST`` to a text type over a ``DECIMAL`` operand."""
+        if not isinstance(node, exp.Cast) or node.to is None:
+            return False
+        if not (
+            node.to.is_type(exp.DataType.Type.VARCHAR) or node.to.is_type(exp.DataType.Type.TEXT)
+        ):
+            return False
+        return _is_decimal(node.this)
+
+    def rewrite(self, node: exp.Expression) -> exp.Expression:
+        r"""Emit ``REGEXP_REPLACE(CAST(x AS TEXT), <trailing zeros>, '\1')``."""
+        return exp.Anonymous(
+            this="REGEXP_REPLACE",
+            expressions=[
+                node.copy(),
+                exp.Literal.string(_TRAILING_ZEROS),
+                exp.Literal.string("\\1"),
+            ],
+        )
+
+
+__all__ = [
+    "NumericToStringRule",
+    "ParseBignumericRule",
+    "ParseNumericRule",
+]

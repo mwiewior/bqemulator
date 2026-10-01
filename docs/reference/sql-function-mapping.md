@@ -50,7 +50,7 @@ table below maps each BigQuery view to its rewriter function.
 
 > **Auto-generated.** Edit translation rules under [`src/bqemulator/sql/rules/`](https://github.com/jjviscomi/bqemulator/blob/main/src/bqemulator/sql/rules/) or rewriters under [`src/bqemulator/sql/rewriter/`](https://github.com/jjviscomi/bqemulator/blob/main/src/bqemulator/sql/rewriter/), then run `make function-mapping` to regenerate this block. The CI gate (`--check`) refuses to merge a PR whose committed registry has drifted from the live source. Per-rule docstring summaries are extracted as the cell text — if a cell reads wrong, edit the rule's docstring.
 
-- **Registered rules**: 92 (13 rule modules)
+- **Registered rules**: 94 (13 rule modules)
 - **Rewriter functions**: 24 (24 rewriter modules; the INFORMATION_SCHEMA rewriter has its own hand-maintained per-view table below)
 
 ### Translation rules (post-transpile AST passes)
@@ -74,6 +74,7 @@ table below maps each BigQuery view to its rewriter function.
 | Date / time / timestamp | `FORMAT_DATE('…%Y…', d)` | unpadded-year rewrite (years < 1000) | `FORMAT_DATE_YEAR_PAD` |
 | Date / time / timestamp | `FORMAT(fmt, args…)` | `printf(fmt, args…)` | `FORMAT_PRINTF` |
 | Date / time / timestamp | `FORMAT_TIME(fmt, t)` | `STRFTIME(DATE '1970-01-01' + t, fmt)` | `FORMAT_TIME` |
+| Date / time / timestamp | `FORMAT_DATE` / `FORMAT_DATETIME` with `%E4Y` | DuckDB `STRFTIME` with `%Y` | `FORMAT_YEAR_E4Y` |
 | Date / time / timestamp | `JSON_TYPE(x)` | `LOWER(JSON_TYPE(x))` | `JSON_TYPE_LOWER` |
 | Date / time / timestamp | `PARSE_DATETIME(fmt, value)` | `strptime(value, fmt)` | `PARSE_DATETIME` |
 | Date / time / timestamp | `STRPTIME(value, fmt)` | `timezone('UTC', STRPTIME(value, fmt))` | `PARSE_TIMESTAMP_UTC` |
@@ -106,6 +107,7 @@ table below maps each BigQuery view to its rewriter function.
 | Math / numeric / misc | `IEEE_DIVIDE(a, b)` | `CAST(a AS DOUBLE) / CAST(b AS DOUBLE)` | `IEEE_DIVIDE` |
 | Math / numeric / misc | `RANGE_BUCKET(point, boundaries)` | `len(list_filter(boundaries, x -> x <= point))` | `RANGE_BUCKET` |
 | Math / numeric / misc | `SIGN(<float_arg>)` | NaN-aware FLOAT64 wrapper | `SIGN_FLOAT_TYPE` |
+| Numeric type helpers | `CAST(<NUMERIC> AS STRING)` | BigQuery's canonical rendering, no padded scale | `NUMERIC_TO_STRING` |
 | Numeric type helpers | `PARSE_BIGNUMERIC(s)` | `bqemu_to_bignumeric(s)` | `PARSE_BIGNUMERIC` |
 | Numeric type helpers | `PARSE_NUMERIC(s)` | `CAST(s AS DECIMAL(38, 9))` | `PARSE_NUMERIC` |
 | RANGE<T> constructors | `GENERATE_RANGE_ARRAY(r, step)` | list of consecutive sub-ranges | `GENERATE_RANGE_ARRAY` |
