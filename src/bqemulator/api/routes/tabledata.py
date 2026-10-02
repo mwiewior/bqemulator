@@ -203,6 +203,130 @@ def _partition_rows_for_insert(
     return good_rows, insert_errors
 
 
+def _match_value(
+    value: Any,
+    field: _SchemaFieldLike,
+    ignore_unknown: bool,
+    prefix: str,
+) -> tuple[Any, str | None]:
+    """Re-key a ``RECORD`` value (a dict, or a list of dicts when ``REPEATED``).
+
+    Any other value is returned unchanged.
+    """
+    if not field.fields:
+        return value, None
+    if isinstance(value, dict):
+        return _match_keys(value, field.fields, ignore_unknown, f"{prefix}{field.name}.")
+    if isinstance(value, list):
+        items: list[Any] = []
+        for item in value:
+            matched_item, unknown = _match_value(item, field, ignore_unknown, prefix)
+            if unknown is not None:
+                return value, unknown
+            items.append(matched_item)
+        return items, None
+    return value, None
+
+
+def _match_keys(
+    payload: dict[str, Any],
+    fields: Sequence[_SchemaFieldLike],
+    ignore_unknown: bool,
+    prefix: str = "",
+) -> tuple[dict[str, Any], str | None]:
+    """Re-key ``payload`` to the schema's own column names, case-insensitively.
+
+    Real BigQuery matches insertAll JSON keys to columns ignoring case
+    (``{"ID": 1}`` lands in column ``id``) and recurses into ``RECORD``
+    values. Returns ``(payload, unknown)``: ``unknown`` is the first key
+    (dotted path) naming no column - BigQuery rejects such a row with
+    ``no such field`` unless ``ignoreUnknownValues`` is set, in which case
+    the key is dropped instead.
+    """
+    by_lower = {f.name.lower(): f for f in fields}
+    out: dict[str, Any] = {}
+    for key, value in payload.items():
+        field = by_lower.get(key.lower())
+        if field is None:
+            if ignore_unknown:
+                continue
+            return payload, f"{prefix}{key}"
+        matched, unknown = _match_value(value, field, ignore_unknown, prefix)
+        if unknown is not None:
+            return payload, unknown
+        out[field.name] = matched
+    return out, None
+
+
+def _match_row_keys(
+    rows: list[dict[str, Any]],
+    fields: Sequence[_SchemaFieldLike],
+    ignore_unknown: bool,
+) -> tuple[list[dict[str, Any]], dict[int, str]]:
+    """Re-key every row's ``json`` with :func:`_match_keys`.
+
+    Returns the re-keyed rows and ``{row index: unknown key}`` for each row
+    naming a column the table does not have.
+    """
+    matched: list[dict[str, Any]] = []
+    unknown_by_index: dict[int, str] = {}
+    for idx, row in enumerate(rows):
+        payload = row.get("json") if isinstance(row, dict) else None
+        if not isinstance(payload, dict):
+            matched.append(row)
+            continue
+        rekeyed, unknown = _match_keys(payload, fields, ignore_unknown)
+        if unknown is not None:
+            unknown_by_index[idx] = unknown
+        matched.append({**row, "json": rekeyed})
+    return matched, unknown_by_index
+
+
+def _no_such_field_errors(
+    row_count: int,
+    unknown_by_index: dict[int, str],
+    skip_invalid_rows: bool,
+) -> list[dict[str, Any]]:
+    """Build BigQuery's ``insertErrors[]`` for rows naming an unknown column.
+
+    Each such row gets ``invalid`` with ``no such field: <key>.``; when the
+    request is not ``skipInvalidRows`` (so nothing at all is inserted),
+    every other row gets ``stopped``.
+    """
+    errors: list[dict[str, Any]] = []
+    for idx in range(row_count):
+        if idx in unknown_by_index:
+            key = unknown_by_index[idx]
+            errors.append(
+                {
+                    "index": idx,
+                    "errors": [
+                        {
+                            "reason": "invalid",
+                            "location": key,
+                            "debugInfo": "",
+                            "message": f"no such field: {key}.",
+                        }
+                    ],
+                }
+            )
+        elif not skip_invalid_rows:
+            errors.append(
+                {
+                    "index": idx,
+                    "errors": [
+                        {
+                            "reason": "stopped",
+                            "location": "",
+                            "debugInfo": "",
+                            "message": "",
+                        }
+                    ],
+                }
+            )
+    return errors
+
+
 @router.post("/projects/{project_id}/datasets/{dataset_id}/tables/{table_id}/insertAll")
 async def insert_all(
     project_id: str,
@@ -224,13 +348,35 @@ async def insert_all(
 
     arrow_schema = _build_arrow_schema(_fields_raw_from_schema(table_meta.schema_.fields))
 
+    # JSON keys match columns case-insensitively; a key naming no column is a
+    # ``no such field`` row error (BigQuery's own behaviour) instead of a column
+    # silently left NULL - unless ``ignoreUnknownValues`` drops such keys.
+    rows, unknown_by_index = _match_row_keys(
+        rows,
+        table_meta.schema_.fields,
+        bool(body.get("ignoreUnknownValues", False)),
+    )
+    insert_errors: list[dict[str, Any]] = []
+    # request index of each row still in ``rows`` - errors always report the caller's own index
+    original_index = list(range(len(rows)))
+    if unknown_by_index:
+        insert_errors = _no_such_field_errors(len(rows), unknown_by_index, skip_invalid_rows)
+        if not skip_invalid_rows:
+            return {"kind": "bigquery#tableDataInsertAllResponse", "insertErrors": insert_errors}
+        original_index = [idx for idx in original_index if idx not in unknown_by_index]
+        rows = [rows[idx] for idx in original_index]
+        if not rows:
+            return {"kind": "bigquery#tableDataInsertAllResponse", "insertErrors": insert_errors}
+
     # ``skipInvalidRows=true`` requests partial success — convert each
     # row in isolation and capture per-row failures in ``insertErrors[]``
     # (matching BigQuery's wire shape). Without the flag, the first bad
     # row aborts the whole request with an internal error.
-    insert_errors: list[dict[str, Any]] = []
     if skip_invalid_rows:
-        rows, insert_errors = _partition_rows_for_insert(rows, arrow_schema)
+        rows, conversion_errors = _partition_rows_for_insert(rows, arrow_schema)
+        for error in conversion_errors:
+            error["index"] = original_index[error["index"]]
+        insert_errors = sorted(insert_errors + conversion_errors, key=lambda e: e["index"])
         if not rows:
             return {
                 "kind": "bigquery#tableDataInsertAllResponse",

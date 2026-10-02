@@ -106,6 +106,73 @@ class TestInsertAll:
         assert r.status_code == 404
 
 
+def _rows(c: TestClient) -> list[list[object]]:
+    body = c.get("/bigquery/v2/projects/p/datasets/td/tables/items/data").json()
+    return sorted([cell["v"] for cell in row["f"]] for row in body.get("rows", []))
+
+
+class TestInsertAllFieldNames:
+    """Real BigQuery matches insertAll JSON keys to columns case-insensitively and rejects a
+    key naming no column (``no such field``) unless ``ignoreUnknownValues`` is set - it never
+    silently stores NULL for a mis-cased column."""
+
+    def test_keys_match_columns_case_insensitively(self, app: FastAPI, _with_table: None) -> None:
+        c = TestClient(app)
+        r = c.post(
+            "/bigquery/v2/projects/p/datasets/td/tables/items/insertAll",
+            json={"rows": [{"json": {"ID": 1, "Label": "first"}}]},
+        )
+        assert r.json()["insertErrors"] == []
+        assert _rows(c) == [["1", "first"]]
+
+    def test_an_unknown_key_rejects_the_request(self, app: FastAPI, _with_table: None) -> None:
+        c = TestClient(app)
+        r = c.post(
+            "/bigquery/v2/projects/p/datasets/td/tables/items/insertAll",
+            json={
+                "rows": [{"json": {"id": 1, "label": "a"}}, {"json": {"id": 2, "colour": "red"}}]
+            },
+        )
+        errors = r.json()["insertErrors"]
+        assert [e["index"] for e in errors] == [0, 1]
+        assert errors[0]["errors"][0]["reason"] == "stopped"
+        assert errors[1]["errors"][0] == {
+            "reason": "invalid",
+            "location": "colour",
+            "debugInfo": "",
+            "message": "no such field: colour.",
+        }
+        assert _rows(c) == []
+
+    def test_skip_invalid_rows_keeps_the_good_rows(self, app: FastAPI, _with_table: None) -> None:
+        c = TestClient(app)
+        r = c.post(
+            "/bigquery/v2/projects/p/datasets/td/tables/items/insertAll",
+            json={
+                "skipInvalidRows": True,
+                "rows": [{"json": {"id": 1, "label": "a"}}, {"json": {"id": 2, "colour": "red"}}],
+            },
+        )
+        assert [e["index"] for e in r.json()["insertErrors"]] == [1]
+        assert _rows(c) == [["1", "a"]]
+
+    def test_ignore_unknown_values_drops_the_unknown_key(
+        self,
+        app: FastAPI,
+        _with_table: None,
+    ) -> None:
+        c = TestClient(app)
+        r = c.post(
+            "/bigquery/v2/projects/p/datasets/td/tables/items/insertAll",
+            json={
+                "ignoreUnknownValues": True,
+                "rows": [{"json": {"id": 1, "label": "a", "colour": "red"}}],
+            },
+        )
+        assert r.json()["insertErrors"] == []
+        assert _rows(c) == [["1", "a"]]
+
+
 class TestListTabledata:
     def test_list_after_insert(self, app: FastAPI, _with_table: None) -> None:
         c = TestClient(app)
