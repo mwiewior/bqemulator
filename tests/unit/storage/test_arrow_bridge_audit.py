@@ -344,4 +344,16 @@ class TestDecimalHappyPath:
     def test_decimal_value_preserves_precision(self) -> None:
         out = ab._format_bq_value(Decimal("12.500000000"), pa.decimal128(38, 9))
         assert isinstance(out, str)
-        assert "12.5" in out
+        assert out == "12.5"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("300.000000000", "300"),
+            ("0E-9", "0"),
+            ("-0.010000000", "-0.01"),
+            ("12345678901234567890.123456789", "12345678901234567890.123456789"),
+        ],
+    )
+    def test_decimal_renders_bigquerys_canonical_form(self, value: str, expected: str) -> None:
+        assert ab._format_bq_value(Decimal(value), pa.decimal128(38, 9)) == expected

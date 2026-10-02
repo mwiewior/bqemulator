@@ -117,7 +117,7 @@ async def test_declared_type_overrides_select_inferred_type(
     fields = select_body["schema"]["fields"]
     assert [(f["name"], f["type"]) for f in fields] == [("amount", "NUMERIC")]
     # NUMERIC rendering preserves the declared precision/scale.
-    assert select_body["rows"] == [{"f": [{"v": "100.000"}]}]
+    assert select_body["rows"] == [{"f": [{"v": "100"}]}]
 
 
 @pytest.mark.asyncio
@@ -138,9 +138,9 @@ async def test_multi_row_select_populates_all_rows(
     )
     rows = [tuple(c["v"] for c in r["f"]) for r in select_body.get("rows", [])]
     assert rows == [
-        ("1", "US", "100.000"),
-        ("2", "EU", "200.500"),
-        ("3", "JP", "300.750"),
+        ("1", "US", "100"),
+        ("2", "EU", "200.5"),
+        ("3", "JP", "300.75"),
     ]
 
 
@@ -394,4 +394,4 @@ async def test_aggregate_select_lands_with_declared_types(
         ("total", "NUMERIC"),
     ]
     rows = [tuple(c["v"] for c in r["f"]) for r in body["rows"]]
-    assert rows == [("1", "300.000"), ("2", "50.000")]
+    assert rows == [("1", "300"), ("2", "50")]

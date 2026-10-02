@@ -228,6 +228,19 @@ def _fmt_bq_struct(value: Any, arrow_type: pa.DataType, _field: pa.Field | None)
     return {"f": fields}
 
 
+def _fmt_bq_decimal(value: Any) -> str:
+    """Render a NUMERIC/BIGNUMERIC cell the way real BigQuery's REST rows do.
+
+    The canonical form has no trailing fractional zeros and no exponent
+    (``300`` / ``200.5`` for a ``DECIMAL(38, 9)`` holding ``300.000000000``
+    / ``200.500000000``) - the column's storage scale never shows.
+    """
+    text = format(Decimal(str(value)), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
+
+
 # Predicate → formatter dispatch for ``_format_bq_value``. Order matters
 # in principle but in practice the Arrow type predicates are mutually
 # exclusive (a type is never both a list and a struct, etc.); the
@@ -236,7 +249,7 @@ def _fmt_bq_struct(value: Any, arrow_type: pa.DataType, _field: pa.Field | None)
 _BQ_TYPE_FORMATTERS: tuple[tuple[Callable[[pa.DataType], bool], Callable[..., Any]], ...] = (
     (pa.types.is_integer, lambda v, _t, _f: str(v)),
     (pa.types.is_floating, lambda v, _t, _f: str(v)),
-    (pa.types.is_decimal, lambda v, _t, _f: str(v)),
+    (pa.types.is_decimal, lambda v, _t, _f: _fmt_bq_decimal(v)),
     (pa.types.is_boolean, lambda v, _t, _f: "true" if v else "false"),
     (lambda t: pa.types.is_string(t) or pa.types.is_large_string(t), lambda v, _t, _f: str(v)),
     (lambda t: pa.types.is_binary(t) or pa.types.is_large_binary(t), _fmt_bq_binary),
