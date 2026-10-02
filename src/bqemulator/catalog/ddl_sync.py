@@ -55,6 +55,7 @@ from bqemulator.catalog.models import (
     TableSchema,
     TimePartitioning,
 )
+from bqemulator.domain.errors import ValidationError
 from bqemulator.storage.sql_identifiers import quoted_table_ref
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -90,6 +91,7 @@ def sync_created_table(bq_sql: str, project_id: str, ctx: AppContext) -> None:
         # (INFORMATION_SCHEMA, ``tables.list``, row-access-policy target
         # validation) can't see it.
         _ensure_dataset(p_id, d_id, ctx)
+    _apply_declared_not_null(bq_sql, p_id, d_id, t_id, ctx)
     schema = _introspect_schema(p_id, d_id, t_id, ctx)
     num_rows = _introspect_num_rows(p_id, d_id, t_id, ctx)
     extras = _extract_ddl_metadata(bq_sql)
@@ -440,6 +442,68 @@ def _detect_plain_create_view(
     if body is None:
         return None, None
     return target, body
+
+
+def _declared_not_null_columns(bq_sql: str) -> list[str]:
+    """Column names a ``CREATE TABLE x (schema) AS SELECT …`` declares ``NOT NULL``.
+
+    Only the combined CTAS-with-schema form: the schema-clause rewriter
+    (``create_table_schema_ctas``) turns it into a bare CTAS, which DuckDB
+    creates with every column nullable. A plain ``CREATE TABLE x (schema)``
+    keeps its NOT NULL constraints in DuckDB itself and needs nothing here.
+    """
+    try:
+        tree = sqlglot.parse_one(bq_sql, read="bigquery")
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(tree, exp.Create) or tree.expression is None:
+        return []
+    schema = tree.this
+    if not isinstance(schema, exp.Schema):
+        return []
+    return [
+        col.name
+        for col in schema.expressions
+        if isinstance(col, exp.ColumnDef)
+        and any(
+            isinstance(c.kind, exp.NotNullColumnConstraint) and not c.kind.args.get("allow_null")
+            for c in col.constraints
+        )
+    ]
+
+
+def _apply_declared_not_null(
+    bq_sql: str,
+    project_id: str,
+    dataset_id: str,
+    table_id: str,
+    ctx: AppContext,
+) -> None:
+    """Make a CTAS-with-schema's declared ``NOT NULL`` columns ``REQUIRED``.
+
+    Real BigQuery creates such a column ``REQUIRED`` and fails the whole
+    statement when the ``SELECT`` yields a NULL for it - dbt-bigquery's
+    enforced model contracts rely on exactly this. DuckDB's ``SET NOT NULL``
+    both records the constraint (which ``_introspect_schema`` reads back as
+    the column mode) and checks the rows already there; on a NULL the new
+    table is dropped and the statement fails, as in BigQuery.
+    """
+    columns = _declared_not_null_columns(bq_sql)
+    if not columns:
+        return
+    target_ref = quoted_table_ref(project_id, dataset_id, table_id)
+    by_lower = {name.lower(): name for name in _column_notnull_map(target_ref, ctx)}
+    for column in columns:
+        actual = by_lower.get(column.lower())
+        if actual is None:
+            continue
+        quoted = '"' + actual.replace('"', '""') + '"'
+        try:
+            ctx.engine.execute(f"ALTER TABLE {target_ref} ALTER COLUMN {quoted} SET NOT NULL")
+        except Exception as exc:
+            ctx.engine.execute(f"DROP TABLE IF EXISTS {target_ref}")
+            msg = f"Required field {column} cannot be null"
+            raise ValidationError(msg) from exc
 
 
 def _detect_plain_create_table(bq_sql: str) -> exp.Table | None:

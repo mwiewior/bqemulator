@@ -140,6 +140,10 @@ def _first_select(body: exp.Expression | None) -> exp.Select | None:
     """
     if body is None:
         return None
+    if isinstance(body, (exp.Subquery, exp.Paren)):
+        # dbt-bigquery's enforced-contract CTAS parenthesises its body:
+        # ``CREATE TABLE x (schema) OPTIONS() AS ( SELECT … )``.
+        return _first_select(body.this)
     if isinstance(body, exp.Select):
         return body
     if isinstance(body, exp.Union):

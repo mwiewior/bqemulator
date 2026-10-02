@@ -395,3 +395,64 @@ async def test_aggregate_select_lands_with_declared_types(
     ]
     rows = [tuple(c["v"] for c in r["f"]) for r in body["rows"]]
     assert rows == [("1", "300"), ("2", "50")]
+
+
+# The exact statement shape dbt-bigquery issues for a model with an enforced contract:
+# a declared schema carrying NOT NULL constraints, ``OPTIONS()``, and a parenthesised body.
+_DBT_CONTRACT_CTAS = (
+    "create or replace table `p`.`ds`.`t_contract` (\n"
+    "    id int64 not null,\n    name string,\n    amt numeric not null\n)\n"
+    "OPTIONS()\nas (\n    select id, name, amt\n    from (\n"
+    "SELECT {select}\n    ) as model_subq\n);"
+)
+
+
+async def _table_fields(c: httpx.AsyncClient, table: str) -> list[tuple[str, str, str]]:
+    response = await c.get(f"/bigquery/v2/projects/p/datasets/ds/tables/{table}")
+    response.raise_for_status()
+    return [
+        (f["name"], f["type"], f.get("mode", "NULLABLE"))
+        for f in response.json()["schema"]["fields"]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_dbt_contract_ctas_keeps_not_null_as_required(
+    client: httpx.AsyncClient,
+) -> None:
+    """dbt's enforced-contract CTAS executes and its NOT NULL columns land REQUIRED."""
+    body = await _query(
+        client,
+        _DBT_CONTRACT_CTAS.format(
+            select="CAST(1 AS INT64) AS id, 'a' AS name, CAST(1.5 AS NUMERIC) AS amt"
+        ),
+    )
+    assert "errors" not in body, body.get("errors")
+    assert await _table_fields(client, "t_contract") == [
+        ("id", "INTEGER", "REQUIRED"),
+        ("name", "STRING", "NULLABLE"),
+        ("amt", "NUMERIC", "REQUIRED"),
+    ]
+    rows = await _query(client, "SELECT id, name, amt FROM `p.ds.t_contract`")
+    assert [tuple(c["v"] for c in r["f"]) for r in rows["rows"]] == [("1", "a", "1.5")]
+
+
+@pytest.mark.asyncio
+async def test_a_null_into_a_declared_not_null_column_fails_the_ctas(
+    client: httpx.AsyncClient,
+) -> None:
+    """Real BigQuery rejects the CTAS when the SELECT yields NULL for a NOT NULL column."""
+    response = await client.post(
+        "/bigquery/v2/projects/p/queries",
+        json={
+            "query": _DBT_CONTRACT_CTAS.format(
+                select="CAST(NULL AS INT64) AS id, 'a' AS name, CAST(1.5 AS NUMERIC) AS amt"
+            ),
+            "useLegacySql": False,
+        },
+    )
+    assert "Required field id cannot be null" in response.text
+    tables = await client.get("/bigquery/v2/projects/p/datasets/ds/tables")
+    assert "t_contract" not in [
+        t["tableReference"]["tableId"] for t in tables.json().get("tables", [])
+    ]
