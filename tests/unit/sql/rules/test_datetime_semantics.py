@@ -488,3 +488,31 @@ class TestFormatDateYearPad:
         )
         assert isinstance(result, Ok)
         assert "EXTRACT(YEAR" not in result.value.upper()
+
+
+class TestCurrentDatetime:
+    """``CURRENT_DATETIME([tz])`` - DuckDB has no such function ("Function not found").
+
+    BigQuery returns the current wall-clock DATETIME (no zone) in ``tz``, UTC by default; found
+    by an Oracle -> BigQuery migration's dbt model (SYSDATE translated to CURRENT_DATETIME()).
+    """
+
+    @pytest.mark.parametrize(
+        "sql",
+        ["SELECT CURRENT_DATETIME()", "SELECT CURRENT_DATETIME", "SELECT current_datetime()"],
+    )
+    def test_returns_the_current_utc_datetime(
+        self, t: SQLTranslator, con: duckdb.DuckDBPyConnection, sql: str
+    ) -> None:
+        before = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+        (value,) = _execute(t, con, sql)
+        after = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+        assert isinstance(value, _dt.datetime) and value.tzinfo is None
+        assert before - _dt.timedelta(seconds=1) <= value <= after + _dt.timedelta(seconds=1)
+
+    def test_honours_a_time_zone_argument(
+        self, t: SQLTranslator, con: duckdb.DuckDBPyConnection
+    ) -> None:
+        (utc,) = _execute(t, con, "SELECT CURRENT_DATETIME('UTC')")
+        (tokyo,) = _execute(t, con, "SELECT CURRENT_DATETIME('Asia/Tokyo')")
+        assert abs((tokyo - utc) - _dt.timedelta(hours=9)) < _dt.timedelta(seconds=5)

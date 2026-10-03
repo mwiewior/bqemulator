@@ -981,3 +981,26 @@ __all__ = [
     "TimeTruncRule",
     "TimestampTruncWeekZoneSundayRule",
 ]
+
+
+@register
+class CurrentDatetimeRule(TranslationRule):
+    """``CURRENT_DATETIME([tz])`` → ``CAST(CURRENT_TIMESTAMP AT TIME ZONE tz AS DATETIME)``.
+
+    DuckDB has no ``current_datetime`` (BigQuery's call failed with ``Function not
+    found``). BigQuery returns the current wall-clock DATETIME - no zone - in ``tz``,
+    UTC when omitted; ``CURRENT_TIMESTAMP AT TIME ZONE tz`` is exactly that instant's
+    naive local time in DuckDB.
+    """
+
+    name = "CURRENT_DATETIME"
+
+    def applies_to(self, node: exp.Expression) -> bool:
+        """Match the typed ``CurrentDatetime`` node."""
+        return isinstance(node, exp.CurrentDatetime)
+
+    def rewrite(self, node: exp.Expression) -> exp.Expression:
+        """Emit the zone-shifted ``CURRENT_TIMESTAMP`` as a DATETIME."""
+        zone = node.this.copy() if node.this is not None else exp.Literal.string("UTC")
+        shifted = exp.AtTimeZone(this=exp.CurrentTimestamp(), zone=zone)
+        return exp.Cast(this=shifted, to=exp.DataType.build("DATETIME"))
