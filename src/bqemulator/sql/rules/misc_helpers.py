@@ -225,6 +225,11 @@ class CountIfEmptyZeroRule(TranslationRule):
         if type(node).__name__ != "CountIf":
             return False
         parent = node.parent
+        if isinstance(parent, exp.Window) and parent.this is node:
+            # ``COUNTIF(p) OVER (...)``: wrapping would attach the window to COALESCE
+            # (a DuckDB parse error); a window always holds its current row, so it is
+            # never empty and never needs the wrapper
+            return False
         already_wrapped = (
             isinstance(parent, exp.Coalesce)
             and parent.expressions

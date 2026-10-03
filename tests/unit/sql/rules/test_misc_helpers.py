@@ -199,6 +199,20 @@ class TestCountIfEmptyZeroRule:
         row = _execute(t, con, "SELECT COUNTIF(v > 0) AS n FROM pos_t")
         assert row == (3,)
 
+    def test_a_windowed_countif_is_left_unwrapped(
+        self, t: SQLTranslator, con: duckdb.DuckDBPyConnection
+    ) -> None:
+        # ``COALESCE(COUNTIF(p), 0) OVER (...)`` puts the window on COALESCE, which DuckDB
+        # rejects ("syntax error at or near OVER"); a window always holds its current row, so
+        # the empty-input wrapper is never needed there
+        con.execute("CREATE TABLE w_t (g INT64, v INT64)")
+        con.execute("INSERT INTO w_t VALUES (1, 1), (1, -1), (2, -3)")
+        result = t.translate(
+            "SELECT g, COUNTIF(v > 0) OVER (PARTITION BY g) AS n FROM w_t ORDER BY g, v"
+        )
+        assert isinstance(result, Ok), result
+        assert con.execute(result.value).fetchall() == [(1, 1), (1, 1), (2, 0)]
+
 
 class TestFarmFingerprintRule:
     """``FARM_FINGERPRINT`` routes through the Python helper."""
