@@ -50,7 +50,7 @@ table below maps each BigQuery view to its rewriter function.
 
 > **Auto-generated.** Edit translation rules under [`src/bqemulator/sql/rules/`](https://github.com/jjviscomi/bqemulator/blob/main/src/bqemulator/sql/rules/) or rewriters under [`src/bqemulator/sql/rewriter/`](https://github.com/jjviscomi/bqemulator/blob/main/src/bqemulator/sql/rewriter/), then run `make function-mapping` to regenerate this block. The CI gate (`--check`) refuses to merge a PR whose committed registry has drifted from the live source. Per-rule docstring summaries are extracted as the cell text — if a cell reads wrong, edit the rule's docstring.
 
-- **Registered rules**: 94 (13 rule modules)
+- **Registered rules**: 95 (13 rule modules)
 - **Rewriter functions**: 24 (24 rewriter modules; the INFORMATION_SCHEMA rewriter has its own hand-maintained per-view table below)
 
 ### Translation rules (post-transpile AST passes)
@@ -68,6 +68,7 @@ table below maps each BigQuery view to its rewriter function.
 | Date / time / timestamp | `APPROX_QUANTILE(x, [q...])` | `QUANTILE_DISC(x, [q...])` | `APPROX_QUANTILES_DISCRETE` |
 | Date / time / timestamp | `ts AT TIME ZONE '+HH:MM' / '-HH:MM'` | interval arithmetic | `AT_TIME_ZONE_NUMERIC_OFFSET` |
 | Date / time / timestamp | `a \|\| b` | `CAST(a \|\| b AS VARCHAR)` | `CONCAT_STRING_TYPE` |
+| Date / time / timestamp | `CURRENT_DATETIME([tz])` | `CAST(CURRENT_TIMESTAMP AT TIME ZONE tz AS DATETIME)` | `CURRENT_DATETIME` |
 | Date / time / timestamp | `EXTRACT(DATE FROM ts)` | `CAST(ts AS DATE)` | `EXTRACT_DATE_FROM_TS` |
 | Date / time / timestamp | `EXTRACT(DAYOFWEEK FROM x)` | `EXTRACT(DAYOFWEEK FROM x) + 1` | `EXTRACT_DAYOFWEEK` |
 | Date / time / timestamp | `EXTRACT(WEEK FROM x)` | Sunday-start week number | `EXTRACT_WEEK_SUNDAY_START` |
